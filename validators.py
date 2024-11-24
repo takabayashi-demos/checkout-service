@@ -19,3 +19,19 @@ class TestCoupon:
 
     def test_coupon_create(self, client):
         """Should create a new coupon entry."""
+
+
+# --- feat: implement cart merge handler ---
+"""Configuration for shipping options."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class ShippingoptionsConfig:
+    """Configuration for shipping options feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("CHECKOUT_SERVICE_TIMEOUT", "5000"))
+    max_retries: int = 3
+    batch_size: int = 100
