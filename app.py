@@ -56,3 +56,25 @@ class TaxHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
+
+
+# --- chore: update Docker base image ---
+"""Tests for coupon in checkout-service."""
+import pytest
+import time
+
+
+class TestCoupon:
+    """Test suite for coupon operations."""
+
+    def test_health_endpoint(self, client):
+        """Health endpoint should return UP."""
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["status"] == "UP"
+
+    def test_coupon_create(self, client):
+        """Should create a new coupon entry."""
+        payload = {"name": "test", "value": 42}
+        response = client.post("/api/v1/coupon", json=payload)
