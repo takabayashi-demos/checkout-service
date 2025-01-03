@@ -78,3 +78,12 @@ class TestCoupon:
         """Should create a new coupon entry."""
         payload = {"name": "test", "value": 42}
         response = client.post("/api/v1/coupon", json=payload)
+
+
+# --- feat: implement tax calculation handler ---
+"""Tests for shipping in checkout-service."""
+import pytest
+import time
+
+
+class TestShipping:
