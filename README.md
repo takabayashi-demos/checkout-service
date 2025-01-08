@@ -20,3 +20,4 @@ curl http://localhost:8080/health
 | GET | /health | Health check |
 | GET | /ready | Readiness probe |
 | GET | /metrics | Prometheus metrics |
+## Checkout Flow\n1. POST /api/v1/checkout\n2. GET /api/v1/orders/:id
