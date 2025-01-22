@@ -105,3 +105,4 @@ import webhook
 @app.route("/api/v1/orders/<order_id>/cancel", methods=["POST"])
 def cancel_order(order_id):
     return {"status": "cancelled"}, 200
+# Empty cart check
