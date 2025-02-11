@@ -56,3 +56,17 @@ class CouponHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
+
+
+# --- security: remove hardcoded credentials ---
+"""Configuration for guest checkout."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class GuestcheckoutConfig:
+    """Configuration for guest checkout feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("CHECKOUT_SERVICE_TIMEOUT", "5000"))
