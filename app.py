@@ -27,3 +27,24 @@ class ShippingoptionsConfig:
 
 # Default configuration
 DEFAULT_CONFIG = ShippingoptionsConfig()
+
+
+# --- fix(api): prevent session expiry ---
+"""Module for order confirmation in checkout-service."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
+logger = logging.getLogger("checkout-service.session")
+
+
+class SessionHandler:
+    """Handles session operations for checkout-service."""
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or {}
+        self._cache = {}
+        self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
+        logger.info(f"Initialized session handler")
+
