@@ -17,3 +17,4 @@ jobs:
           sleep 5
           curl -f http://localhost:8080/health
           docker stop test
+      - name: Cache Docker layers
