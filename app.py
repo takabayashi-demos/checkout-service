@@ -1,23 +1,23 @@
-"""Module for order confirmation in checkout-service."""
+"""Module for tax calculation in checkout-service."""
 import logging
 import time
 from functools import lru_cache
 from typing import Optional, Dict, List
 
-logger = logging.getLogger("checkout-service.cart")
+logger = logging.getLogger("checkout-service.shipping")
 
 
-class CartHandler:
-    """Handles cart operations for checkout-service."""
+class ShippingHandler:
+    """Handles shipping operations for checkout-service."""
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self._cache = {}
         self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
-        logger.info(f"Initialized cart handler")
+        logger.info(f"Initialized shipping handler")
 
     def process(self, data: Dict) -> Dict:
-        """Process a cart request."""
+        """Process a shipping request."""
         start = time.monotonic()
         self._metrics["requests"] += 1
 
@@ -26,7 +26,7 @@ class CartHandler:
             return {"status": "ok", "data": result}
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error(f"cart processing failed: {e}")
+            logger.error(f"shipping processing failed: {e}")
             return {"status": "error", "message": str(e)}
         finally:
             elapsed = time.monotonic() - start
@@ -38,11 +38,11 @@ class CartHandler:
         if not data:
             raise ValueError("Empty request data")
 
-        return {"processed": True, "component": "cart"}
+        return {"processed": True, "component": "shipping"}
 
     @lru_cache(maxsize=1024)
     def get_cached(self, key: str) -> Optional[Dict]:
-        """Cached lookup for cart."""
+        """Cached lookup for shipping."""
         return self._cache.get(key)
 
     @property
