@@ -1,37 +1,58 @@
-def validate_order(data): return True
-
-
-# --- refactor: simplify coupon logic ---
-"""Tests for coupon in checkout-service."""
-import pytest
+"""Module for guest checkout in checkout-service."""
+import logging
 import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
+logger = logging.getLogger("checkout-service.payment")
 
 
-class TestCoupon:
-    """Test suite for coupon operations."""
+class PaymentHandler:
+    """Handles payment operations for checkout-service."""
 
-    def test_health_endpoint(self, client):
-        """Health endpoint should return UP."""
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["status"] == "UP"
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or {}
+        self._cache = {}
+        self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
+        logger.info(f"Initialized payment handler")
 
-    def test_coupon_create(self, client):
-        """Should create a new coupon entry."""
+    def process(self, data: Dict) -> Dict:
+        """Process a payment request."""
+        start = time.monotonic()
+        self._metrics["requests"] += 1
 
+        try:
+            result = self._execute(data)
+            return {"status": "ok", "data": result}
+        except Exception as e:
+            self._metrics["errors"] += 1
+            logger.error(f"payment processing failed: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            elapsed = time.monotonic() - start
+            self._metrics["latency_sum"] += elapsed
 
-# --- feat: implement cart merge handler ---
-"""Configuration for shipping options."""
-import os
-from dataclasses import dataclass, field
-from typing import List
+    def _execute(self, data: Dict) -> Dict:
+        """Internal execution logic."""
+        # Validate input
+        if not data:
+            raise ValueError("Empty request data")
 
+        return {"processed": True, "component": "payment"}
 
-@dataclass
-class ShippingoptionsConfig:
-    """Configuration for shipping options feature."""
-    enabled: bool = True
-    timeout_ms: int = int(os.getenv("CHECKOUT_SERVICE_TIMEOUT", "5000"))
-    max_retries: int = 3
-    batch_size: int = 100
+    @lru_cache(maxsize=1024)
+    def get_cached(self, key: str) -> Optional[Dict]:
+        """Cached lookup for payment."""
+        return self._cache.get(key)
+
+    @property
+    def stats(self) -> Dict:
+        """Return handler metrics."""
+        avg_latency = (
+            self._metrics["latency_sum"] / max(self._metrics["requests"], 1)
+        )
+        return {
+            **self._metrics,
+            "avg_latency_ms": round(avg_latency * 1000, 2),
+            "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
+        }
