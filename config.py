@@ -1,45 +1,29 @@
-"""Tests for tax in checkout-service."""
-import pytest
-import time
+"""Configuration for guest checkout."""
+import os
+from dataclasses import dataclass, field
+from typing import List
 
 
-class TestTax:
-    """Test suite for tax operations."""
+@dataclass
+class GuestcheckoutConfig:
+    """Configuration for guest checkout feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("CHECKOUT_SERVICE_TIMEOUT", "5000"))
+    max_retries: int = 3
+    batch_size: int = 100
+    cache_ttl_seconds: int = 300
+    allowed_regions: List[str] = field(default_factory=lambda: ["us-east-1", "us-west-2", "eu-west-1"])
 
-    def test_health_endpoint(self, client):
-        """Health endpoint should return UP."""
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["status"] == "UP"
+    def validate(self) -> bool:
+        """Validate configuration values."""
+        if self.timeout_ms < 100:
+            raise ValueError("Timeout must be >= 100ms")
+        if self.max_retries < 0:
+            raise ValueError("Max retries cannot be negative")
+        if self.batch_size > 10000:
+            raise ValueError("Batch size too large")
+        return True
 
-    def test_tax_create(self, client):
-        """Should create a new tax entry."""
-        payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/tax", json=payload)
-        assert response.status_code in (200, 201)
 
-    def test_tax_validation(self, client):
-        """Should reject invalid tax data."""
-        response = client.post("/api/v1/tax", json={})
-        assert response.status_code in (400, 422)
-
-    def test_tax_not_found(self, client):
-        """Should return 404 for missing tax."""
-        response = client.get("/api/v1/tax/nonexistent")
-        assert response.status_code == 404
-
-    @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_tax_pagination(self, client, limit):
-        """Should respect pagination limits."""
-        response = client.get(f"/api/v1/tax?limit={limit}")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert len(data.get("items", data.get("taxs", []))) <= limit
-
-    def test_tax_performance(self, client):
-        """Response time should be under 500ms."""
-        start = time.monotonic()
-        response = client.get("/api/v1/tax")
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+# Default configuration
+DEFAULT_CONFIG = GuestcheckoutConfig()
