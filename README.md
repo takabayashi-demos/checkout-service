@@ -20,3 +20,4 @@ curl http://localhost:8080/health
 | GET | /health | Health check |
 | GET | /ready | Readiness probe |
 | GET | /metrics | Prometheus metrics |
+# PR 2 - 2026-04-15T18:47:17
