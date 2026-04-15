@@ -107,3 +107,4 @@ def cancel_order(order_id):
     return {"status": "cancelled"}, 200
 # Empty cart check
 # Gift card payment method
+SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "BRL"]
