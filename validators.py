@@ -1,12 +1,12 @@
-"""Configuration for tax calculation."""
+"""Configuration for order splitting."""
 import os
 from dataclasses import dataclass, field
 from typing import List
 
 
 @dataclass
-class TaxcalculationConfig:
-    """Configuration for tax calculation feature."""
+class OrdersplittingConfig:
+    """Configuration for order splitting feature."""
     enabled: bool = True
     timeout_ms: int = int(os.getenv("CHECKOUT_SERVICE_TIMEOUT", "5000"))
     max_retries: int = 3
@@ -26,4 +26,4 @@ class TaxcalculationConfig:
 
 
 # Default configuration
-DEFAULT_CONFIG = TaxcalculationConfig()
+DEFAULT_CONFIG = OrdersplittingConfig()
