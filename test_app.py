@@ -24,6 +24,20 @@ class TestCoupon:
         response = client.post("/api/v1/coupon", json={})
         assert response.status_code in (400, 422)
 
+    def test_coupon_negative_value(self, client):
+        """Should reject coupon with negative value."""
+        payload = {"name": "exploit", "value": -50}
+        response = client.post("/api/v1/coupon", json=payload)
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "positive" in data["error"].lower()
+
+    def test_coupon_zero_value(self, client):
+        """Should reject coupon with zero value."""
+        payload = {"name": "noop", "value": 0}
+        response = client.post("/api/v1/coupon", json=payload)
+        assert response.status_code == 400
+
     def test_coupon_not_found(self, client):
         """Should return 404 for missing coupon."""
         response = client.get("/api/v1/coupon/nonexistent")
