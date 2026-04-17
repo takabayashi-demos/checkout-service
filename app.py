@@ -79,6 +79,21 @@ def get_db():
     return engine.connect()
 
 
+def parse_int_param(value, default, min_val=0, max_val=None):
+    """Parse and validate integer query parameter."""
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        if parsed < min_val:
+            raise ValueError(f"Value must be at least {min_val}")
+        if max_val is not None and parsed > max_val:
+            raise ValueError(f"Value must not exceed {max_val}")
+        return parsed
+    except ValueError as e:
+        raise ValueError(f"Invalid integer value: {e}")
+
+
 @app.route("/health")
 def health():
     """Liveness probe."""
@@ -91,8 +106,11 @@ def health():
 @app.route("/api/v1/coupon", methods=["GET"])
 def list_coupons():
     """List coupons with pagination. Uses server-side cursor for large sets."""
-    limit = min(int(request.args.get("limit", 20)), 100)
-    offset = int(request.args.get("offset", 0))
+    try:
+        limit = parse_int_param(request.args.get("limit"), default=20, min_val=1, max_val=100)
+        offset = parse_int_param(request.args.get("offset"), default=0, min_val=0)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     cache_key = f"coupons:list:{limit}:{offset}"
     cached = cache_get(cache_key)
@@ -139,27 +157,35 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "request body required"}), 400
+
+    required_fields = ["code", "name", "value"]
+    for field in required_fields:
+        if field not in data:
+            return jsonify({"error": f"missing required field: {field}"}), 400
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": data.get("active", True),
+            },
         )
-        coupon_id = result.fetchone()[0]
         conn.commit()
+        coupon_id = result.fetchone()[0]
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
-
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+    cache_delete("coupons:*")
+    return jsonify({"id": coupon_id}), 201
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=5000)
