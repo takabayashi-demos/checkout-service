@@ -67,11 +67,18 @@ def cache_delete(pattern):
     if cache is None:
         return
     try:
-        keys = cache.keys(pattern)
-        if keys:
-            cache.delete(*keys)
-    except redis.RedisError:
-        pass
+        # Use SCAN instead of KEYS to avoid blocking Redis.
+        # KEYS blocks the entire Redis instance while scanning,
+        # which can cause timeouts during high traffic.
+        keys_to_delete = []
+        for key in cache.scan_iter(match=pattern, count=100):
+            keys_to_delete.append(key)
+        
+        if keys_to_delete:
+            cache.delete(*keys_to_delete)
+            logger.info(f"Invalidated {len(keys_to_delete)} cache entries matching {pattern}")
+    except redis.RedisError as e:
+        logger.warning(f"Cache invalidation failed: {e}")
 
 
 def get_db():
@@ -139,26 +146,33 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    if not data or not all(k in data for k in ["code", "name", "value"]):
+        return jsonify({"error": "missing required fields"}), 400
 
-    with get_db() as conn:
-        result = conn.execute(
-            text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
-            ),
-            {"name": data["name"], "value": data["value"]},
-        )
-        coupon_id = result.fetchone()[0]
-        conn.commit()
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text(
+                    "INSERT INTO coupons (code, name, value, active) "
+                    "VALUES (:code, :name, :value, :active) RETURNING id"
+                ),
+                {
+                    "code": data["code"],
+                    "name": data["name"],
+                    "value": data["value"],
+                    "active": data.get("active", True),
+                },
+            )
+            coupon_id = result.fetchone()[0]
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to create coupon: {e}")
+        return jsonify({"error": "database error"}), 500
 
-    # Invalidate list caches so new coupon appears immediately.
     cache_delete("coupons:list:*")
-
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+    return jsonify({"id": coupon_id}), 201
 
 
 if __name__ == "__main__":
