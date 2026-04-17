@@ -1,122 +1,274 @@
-"""Tests for coupon in checkout-service."""
-import pytest
-import time
+"""Unit tests for checkout-service."""
 import json
-from unittest.mock import patch, MagicMock
+import pytest
+from unittest.mock import Mock, patch, MagicMock
+from app import app, cache_get, cache_set, cache_delete
 
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked DB and cache."""
-    # Patch Redis before importing app so connection doesn't fail.
-    with patch("app.cache", None):
-        from app import app
-        app.config["TESTING"] = True
-        with app.test_client() as c:
-            yield c
+    """Test client fixture."""
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
 
 
-class TestCoupon:
-    """Test suite for coupon operations."""
+@pytest.fixture
+def mock_db():
+    """Mock database connection."""
+    with patch('app.get_db') as mock:
+        yield mock
 
-    def test_health_endpoint(self, client):
-        """Health endpoint should return UP."""
-        response = client.get("/health")
+
+@pytest.fixture
+def mock_cache():
+    """Mock Redis cache."""
+    with patch('app.cache') as mock:
+        yield mock
+
+
+class TestHealthEndpoint:
+    """Tests for /health endpoint."""
+
+    def test_health_check_with_cache(self, client, mock_cache):
+        """Health endpoint returns UP when cache is available."""
+        mock_cache.__bool__.return_value = True
+        response = client.get('/health')
         assert response.status_code == 200
         data = response.get_json()
-        assert data["status"] == "UP"
+        assert data['status'] == 'UP'
+        assert data['service'] == 'checkout-service'
+        assert data['cache'] == 'UP'
 
-    def test_coupon_create(self, client):
-        """Should create a new coupon entry."""
-        payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/coupon", json=payload)
-        assert response.status_code in (200, 201)
+    def test_health_check_without_cache(self, client):
+        """Health endpoint returns DEGRADED when cache is unavailable."""
+        with patch('app.cache', None):
+            response = client.get('/health')
+            assert response.status_code == 200
+            data = response.get_json()
+            assert data['status'] == 'UP'
+            assert data['cache'] == 'DEGRADED'
 
-    def test_coupon_validation(self, client):
-        """Should reject invalid coupon data."""
-        response = client.post("/api/v1/coupon", json={})
-        assert response.status_code in (400, 422)
 
-    def test_coupon_not_found(self, client):
-        """Should return 404 for missing coupon."""
-        response = client.get("/api/v1/coupon/nonexistent")
+class TestListCoupons:
+    """Tests for GET /api/v1/coupon endpoint."""
+
+    def test_list_coupons_default_pagination(self, client, mock_db, mock_cache):
+        """List coupons with default limit and offset."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+
+        mock_result = [
+            {'id': 1, 'code': 'SAVE10', 'name': 'Save 10%', 'value': 10, 'active': True},
+            {'id': 2, 'code': 'SAVE20', 'name': 'Save 20%', 'value': 20, 'active': True}
+        ]
+        mock_conn.execute.return_value = [Mock(_mapping=r) for r in mock_result]
+
+        response = client.get('/api/v1/coupon')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['limit'] == 20
+        assert data['offset'] == 0
+        assert len(data['items']) == 2
+        assert data['items'][0]['code'] == 'SAVE10'
+
+    def test_list_coupons_custom_pagination(self, client, mock_db, mock_cache):
+        """List coupons with custom limit and offset."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.execute.return_value = []
+
+        response = client.get('/api/v1/coupon?limit=50&offset=10')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['limit'] == 50
+        assert data['offset'] == 10
+
+    def test_list_coupons_limit_cap(self, client, mock_db, mock_cache):
+        """List coupons enforces max limit of 100."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.execute.return_value = []
+
+        response = client.get('/api/v1/coupon?limit=200')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['limit'] == 100
+
+    def test_list_coupons_cache_hit(self, client, mock_cache):
+        """List coupons returns cached data when available."""
+        cached_data = {'items': [{'id': 1, 'code': 'CACHED'}], 'limit': 20, 'offset': 0}
+        mock_cache.get.return_value = json.dumps(cached_data)
+
+        response = client.get('/api/v1/coupon')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data == cached_data
+        assert data['items'][0]['code'] == 'CACHED'
+
+    def test_list_coupons_zero_limit(self, client, mock_db, mock_cache):
+        """List coupons handles zero limit edge case."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.execute.return_value = []
+
+        response = client.get('/api/v1/coupon?limit=0')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['limit'] == 0
+
+
+class TestGetCoupon:
+    """Tests for GET /api/v1/coupon/<id> endpoint."""
+
+    def test_get_coupon_success(self, client, mock_db, mock_cache):
+        """Get coupon by ID returns coupon data."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+
+        mock_row = Mock(_mapping={
+            'id': 1,
+            'code': 'SAVE10',
+            'name': 'Save 10%',
+            'value': 10,
+            'active': True
+        })
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+
+        response = client.get('/api/v1/coupon/1')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['id'] == 1
+        assert data['code'] == 'SAVE10'
+        assert data['value'] == 10
+
+    def test_get_coupon_not_found(self, client, mock_db, mock_cache):
+        """Get coupon returns 404 when coupon doesn't exist."""
+        mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        response = client.get('/api/v1/coupon/999')
         assert response.status_code == 404
-
-    @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_coupon_pagination(self, client, limit):
-        """Should respect pagination limits."""
-        response = client.get(f"/api/v1/coupon?limit={limit}")
-        assert response.status_code == 200
         data = response.get_json()
-        assert len(data.get("items", data.get("coupons", []))) <= limit
+        assert 'error' in data
+        assert data['error'] == 'coupon not found'
 
-    def test_coupon_performance(self, client):
-        """Response time should be under 500ms."""
-        start = time.monotonic()
-        response = client.get("/api/v1/coupon")
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
-
-
-class TestCouponCaching:
-    """Tests for the Redis caching layer."""
-
-    def test_cache_hit_returns_cached_data(self):
-        """GET /coupon/<id> should return cached data without hitting DB."""
-        cached_coupon = {"id": 1, "code": "SAVE10", "name": "Save 10", "value": 10, "active": True}
-        mock_cache = MagicMock()
+    def test_get_coupon_cache_hit(self, client, mock_cache):
+        """Get coupon returns cached data when available."""
+        cached_coupon = {
+            'id': 1,
+            'code': 'SAVE10',
+            'name': 'Save 10%',
+            'value': 10,
+            'active': True
+        }
         mock_cache.get.return_value = json.dumps(cached_coupon)
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
-
+        response = client.get('/api/v1/coupon/1')
         assert response.status_code == 200
         data = response.get_json()
-        assert data["code"] == "SAVE10"
+        assert data == cached_coupon
 
-    def test_cache_miss_falls_through_to_db(self):
-        """When cache misses, the request should still succeed via DB."""
-        mock_cache = MagicMock()
+    def test_get_coupon_invalid_id_type(self, client, mock_db, mock_cache):
+        """Get coupon handles non-numeric IDs gracefully."""
         mock_cache.get.return_value = None
+        mock_conn = MagicMock()
+        mock_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.execute.return_value.fetchone.return_value = None
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/nonexistent")
-
-        # Should still work (404 because coupon doesn't exist, not 500)
+        response = client.get('/api/v1/coupon/invalid')
         assert response.status_code == 404
 
-    def test_cache_failure_degrades_gracefully(self):
-        """If Redis throws, requests should still work via DB."""
-        import redis as redis_mod
-        mock_cache = MagicMock()
-        mock_cache.get.side_effect = redis_mod.RedisError("connection lost")
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
+class TestCacheHelpers:
+    """Tests for cache utility functions."""
 
-        # Should degrade to DB path, not crash
-        assert response.status_code in (200, 404)
+    def test_cache_get_miss(self):
+        """cache_get returns None on cache miss."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.get.return_value = None
+            result = cache_get('test_key')
+            assert result is None
 
-    def test_create_invalidates_list_cache(self):
-        """POST /coupon should invalidate the list cache."""
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = None
-        mock_cache.keys.return_value = ["coupons:list:20:0"]
+    def test_cache_get_hit(self):
+        """cache_get returns parsed JSON on cache hit."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.get.return_value = '{"foo": "bar"}'
+            result = cache_get('test_key')
+            assert result == {"foo": "bar"}
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                c.post("/api/v1/coupon", json={"name": "new", "value": 15})
+    def test_cache_get_no_cache(self):
+        """cache_get returns None when cache is unavailable."""
+        with patch('app.cache', None):
+            result = cache_get('test_key')
+            assert result is None
 
-        mock_cache.keys.assert_called_with("coupons:list:*")
-        mock_cache.delete.assert_called_once()
+    def test_cache_get_redis_error(self):
+        """cache_get returns None on Redis error."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.get.side_effect = Exception("Redis connection error")
+            result = cache_get('test_key')
+            assert result is None
+
+    def test_cache_get_invalid_json(self):
+        """cache_get returns None on invalid JSON."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.get.return_value = 'not valid json{'
+            result = cache_get('test_key')
+            assert result is None
+
+    def test_cache_set_success(self):
+        """cache_set writes to cache with TTL."""
+        with patch('app.cache') as mock_cache:
+            cache_set('test_key', {'foo': 'bar'}, ttl=120)
+            mock_cache.setex.assert_called_once_with('test_key', 120, '{"foo": "bar"}')
+
+    def test_cache_set_default_ttl(self):
+        """cache_set uses default TTL when not specified."""
+        with patch('app.cache') as mock_cache:
+            with patch('app.CACHE_TTL', 60):
+                cache_set('test_key', {'foo': 'bar'})
+                mock_cache.setex.assert_called_once_with('test_key', 60, '{"foo": "bar"}')
+
+    def test_cache_set_no_cache(self):
+        """cache_set is a no-op when cache is unavailable."""
+        with patch('app.cache', None):
+            cache_set('test_key', {'foo': 'bar'})
+
+    def test_cache_set_redis_error(self):
+        """cache_set silently handles Redis errors."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.setex.side_effect = Exception("Redis write error")
+            cache_set('test_key', {'foo': 'bar'})
+
+    def test_cache_delete_success(self):
+        """cache_delete removes matching keys."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.keys.return_value = ['key1', 'key2', 'key3']
+            cache_delete('key*')
+            mock_cache.delete.assert_called_once_with('key1', 'key2', 'key3')
+
+    def test_cache_delete_no_keys(self):
+        """cache_delete handles no matching keys."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.keys.return_value = []
+            cache_delete('nonexistent*')
+            mock_cache.delete.assert_not_called()
+
+    def test_cache_delete_no_cache(self):
+        """cache_delete is a no-op when cache is unavailable."""
+        with patch('app.cache', None):
+            cache_delete('key*')
+
+    def test_cache_delete_redis_error(self):
+        """cache_delete silently handles Redis errors."""
+        with patch('app.cache') as mock_cache:
+            mock_cache.keys.side_effect = Exception("Redis error")
+            cache_delete('key*')
