@@ -12,11 +12,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Database and cache configuration
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://checkout:checkout@localhost:5432/checkout_db"
 )
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CACHE_TTL = int(os.environ.get("COUPON_CACHE_TTL", 60))
+
+# Cache key prefixes
+CACHE_PREFIX_COUPON_LIST = "coupons:list"
+CACHE_PREFIX_COUPON_ID = "coupons:id"
 
 # Connection pooling — reuse connections across requests instead of
 # opening a new connection per request (was the main latency source).
@@ -39,6 +44,11 @@ try:
 except redis.ConnectionError:
     logger.warning("Redis unavailable, running without cache")
     cache = None
+
+
+def build_cache_key(prefix, *parts):
+    """Build a cache key from prefix and parts."""
+    return ":".join([prefix] + [str(p) for p in parts])
 
 
 def cache_get(key):
@@ -94,7 +104,7 @@ def list_coupons():
     limit = min(int(request.args.get("limit", 20)), 100)
     offset = int(request.args.get("offset", 0))
 
-    cache_key = f"coupons:list:{limit}:{offset}"
+    cache_key = build_cache_key(CACHE_PREFIX_COUPON_LIST, limit, offset)
     cached = cache_get(cache_key)
     if cached:
         return jsonify(cached)
@@ -117,7 +127,7 @@ def list_coupons():
 @app.route("/api/v1/coupon/<coupon_id>", methods=["GET"])
 def get_coupon(coupon_id):
     """Fetch a single coupon by ID. Cached for CACHE_TTL seconds."""
-    cache_key = f"coupons:id:{coupon_id}"
+    cache_key = build_cache_key(CACHE_PREFIX_COUPON_ID, coupon_id)
     cached = cache_get(cache_key)
     if cached:
         return jsonify(cached)
@@ -139,27 +149,36 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Request body must be JSON"}), 400
+
+    required_fields = ["code", "name", "value"]
+    missing = [f for f in required_fields if f not in data]
+    if missing:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": float(data["value"]),
+                "active": data.get("active", True),
+            },
         )
-        coupon_id = result.fetchone()[0]
         conn.commit()
+        coupon_id = result.fetchone()[0]
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
-
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+    cache_delete(f"{CACHE_PREFIX_COUPON_LIST}:*")
+    logger.info(f"Created coupon {coupon_id}")
+    return jsonify({"id": coupon_id}), 201
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=5000, debug=False)
