@@ -139,27 +139,76 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    required = ["code", "name", "value"]
+    if not all(field in data for field in required):
+        return jsonify({"error": "missing required fields"}), 400
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": data.get("active", True),
+            },
         )
-        coupon_id = result.fetchone()[0]
         conn.commit()
+        coupon_id = result.fetchone()[0]
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
+    cache_delete("coupons:*")
+    return jsonify({"id": coupon_id}), 201
 
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+
+@app.route("/api/v1/coupon/validate", methods=["POST"])
+def validate_coupon():
+    """Validate a coupon code against a cart total."""
+    data = request.get_json()
+    if not data or "code" not in data or "cart_total" not in data:
+        return jsonify({"error": "missing code or cart_total"}), 400
+
+    code = data["code"].upper()
+    cart_total = float(data["cart_total"])
+
+    cache_key = f"coupons:validate:{code}"
+    cached = cache_get(cache_key)
+
+    if cached is None:
+        with get_db() as conn:
+            result = conn.execute(
+                text("SELECT id, code, name, value, active FROM coupons WHERE UPPER(code) = :code"),
+                {"code": code},
+            )
+            row = result.fetchone()
+
+        if row is None:
+            return jsonify({"valid": False, "message": "coupon not found"}), 200
+
+        coupon = dict(row._mapping)
+        cache_set(cache_key, coupon)
+    else:
+        coupon = cached
+
+    if not coupon.get("active", False):
+        return jsonify({"valid": False, "message": "coupon is inactive"}), 200
+
+    discount = float(coupon["value"])
+    final_total = max(0, cart_total - discount)
+
+    return jsonify({
+        "valid": True,
+        "coupon_code": coupon["code"],
+        "discount_amount": discount,
+        "cart_total": cart_total,
+        "final_total": final_total,
+        "message": "coupon applied successfully"
+    }), 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080, debug=False)
