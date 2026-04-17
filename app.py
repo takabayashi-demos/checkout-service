@@ -89,6 +89,12 @@ def get_db():
     return engine.connect()
 
 
+def error_response(message, status_code=400):
+    """Create a standardized error response."""
+    logger.warning(f"Error response: {message} (status={status_code})")
+    return jsonify({"error": message}), status_code
+
+
 @app.route("/health")
 def health():
     """Liveness probe."""
@@ -101,23 +107,30 @@ def health():
 @app.route("/api/v1/coupon", methods=["GET"])
 def list_coupons():
     """List coupons with pagination. Uses server-side cursor for large sets."""
-    limit = min(int(request.args.get("limit", 20)), 100)
-    offset = int(request.args.get("offset", 0))
+    try:
+        limit = min(int(request.args.get("limit", 20)), 100)
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        return error_response("Invalid limit or offset parameter")
 
     cache_key = build_cache_key(CACHE_PREFIX_COUPON_LIST, limit, offset)
     cached = cache_get(cache_key)
     if cached:
         return jsonify(cached)
 
-    with get_db() as conn:
-        result = conn.execute(
-            text(
-                "SELECT id, code, name, value, active "
-                "FROM coupons ORDER BY id LIMIT :limit OFFSET :offset"
-            ),
-            {"limit": limit, "offset": offset},
-        )
-        items = [dict(row._mapping) for row in result]
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT id, code, name, value, active "
+                    "FROM coupons ORDER BY id LIMIT :limit OFFSET :offset"
+                ),
+                {"limit": limit, "offset": offset},
+            )
+            items = [dict(row._mapping) for row in result]
+    except Exception as e:
+        logger.error(f"Database error in list_coupons: {e}")
+        return error_response("Database error", status_code=500)
 
     response_data = {"items": items, "limit": limit, "offset": offset}
     cache_set(cache_key, response_data)
@@ -127,20 +140,29 @@ def list_coupons():
 @app.route("/api/v1/coupon/<coupon_id>", methods=["GET"])
 def get_coupon(coupon_id):
     """Fetch a single coupon by ID. Cached for CACHE_TTL seconds."""
+    try:
+        coupon_id = int(coupon_id)
+    except ValueError:
+        return error_response("Invalid coupon ID")
+
     cache_key = build_cache_key(CACHE_PREFIX_COUPON_ID, coupon_id)
     cached = cache_get(cache_key)
     if cached:
         return jsonify(cached)
 
-    with get_db() as conn:
-        result = conn.execute(
-            text("SELECT id, code, name, value, active FROM coupons WHERE id = :id"),
-            {"id": coupon_id},
-        )
-        row = result.fetchone()
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text("SELECT id, code, name, value, active FROM coupons WHERE id = :id"),
+                {"id": coupon_id},
+            )
+            row = result.fetchone()
+    except Exception as e:
+        logger.error(f"Database error in get_coupon: {e}")
+        return error_response("Database error", status_code=500)
 
     if row is None:
-        return jsonify({"error": "coupon not found"}), 404
+        return error_response("Coupon not found", status_code=404)
 
     coupon_data = dict(row._mapping)
     cache_set(cache_key, coupon_data)
@@ -152,28 +174,34 @@ def create_coupon():
     """Create a new coupon."""
     data = request.get_json()
     if not data:
-        return jsonify({"error": "Request body must be JSON"}), 400
+        return error_response("Request body must be JSON")
 
     required_fields = ["code", "name", "value"]
     missing = [f for f in required_fields if f not in data]
     if missing:
-        return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
+        return error_response(f"Missing required fields: {', '.join(missing)}")
 
-    with get_db() as conn:
-        result = conn.execute(
-            text(
-                "INSERT INTO coupons (code, name, value, active) "
-                "VALUES (:code, :name, :value, :active) RETURNING id"
-            ),
-            {
-                "code": data["code"],
-                "name": data["name"],
-                "value": float(data["value"]),
-                "active": data.get("active", True),
-            },
-        )
-        conn.commit()
-        coupon_id = result.fetchone()[0]
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text(
+                    "INSERT INTO coupons (code, name, value, active) "
+                    "VALUES (:code, :name, :value, :active) RETURNING id"
+                ),
+                {
+                    "code": data["code"],
+                    "name": data["name"],
+                    "value": float(data["value"]),
+                    "active": data.get("active", True),
+                },
+            )
+            conn.commit()
+            coupon_id = result.fetchone()[0]
+    except ValueError:
+        return error_response("Invalid value format")
+    except Exception as e:
+        logger.error(f"Database error in create_coupon: {e}")
+        return error_response("Database error", status_code=500)
 
     cache_delete(f"{CACHE_PREFIX_COUPON_LIST}:*")
     logger.info(f"Created coupon {coupon_id}")
