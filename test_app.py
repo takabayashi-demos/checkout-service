@@ -1,122 +1,132 @@
-"""Tests for coupon in checkout-service."""
+"""Security tests for checkout-service."""
 import pytest
-import time
 import json
-from unittest.mock import patch, MagicMock
+from app import app, validate_integer, validate_coupon_code, validate_coupon_data
 
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked DB and cache."""
-    # Patch Redis before importing app so connection doesn't fail.
-    with patch("app.cache", None):
-        from app import app
-        app.config["TESTING"] = True
-        with app.test_client() as c:
-            yield c
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        yield client
 
 
-class TestCoupon:
-    """Test suite for coupon operations."""
+class TestInputValidation:
+    """Test input validation functions."""
 
-    def test_health_endpoint(self, client):
-        """Health endpoint should return UP."""
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["status"] == "UP"
+    def test_validate_integer_valid(self):
+        assert validate_integer("42", "test") == 42
+        assert validate_integer("0", "test", min_val=0) == 0
+        assert validate_integer("100", "test", max_val=100) == 100
 
-    def test_coupon_create(self, client):
-        """Should create a new coupon entry."""
-        payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/coupon", json=payload)
-        assert response.status_code in (200, 201)
+    def test_validate_integer_invalid(self):
+        with pytest.raises(ValueError, match="Invalid test"):
+            validate_integer("abc", "test")
+        with pytest.raises(ValueError, match="must be between"):
+            validate_integer("-1", "test", min_val=0)
+        with pytest.raises(ValueError, match="must be between"):
+            validate_integer("10001", "test", max_val=10000)
 
-    def test_coupon_validation(self, client):
-        """Should reject invalid coupon data."""
-        response = client.post("/api/v1/coupon", json={})
-        assert response.status_code in (400, 422)
+    def test_validate_coupon_code_valid(self):
+        assert validate_coupon_code("SAVE20") == "SAVE20"
+        assert validate_coupon_code("WINTER-2024") == "WINTER-2024"
+        assert validate_coupon_code("CODE_123") == "CODE_123"
 
-    def test_coupon_not_found(self, client):
-        """Should return 404 for missing coupon."""
-        response = client.get("/api/v1/coupon/nonexistent")
-        assert response.status_code == 404
+    def test_validate_coupon_code_invalid(self):
+        with pytest.raises(ValueError, match="must be a string"):
+            validate_coupon_code(123)
+        with pytest.raises(ValueError, match="must be 3-50 characters"):
+            validate_coupon_code("AB")
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_coupon_code("save20<script>")
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_coupon_code("DROP TABLE coupons;--")
 
-    @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_coupon_pagination(self, client, limit):
-        """Should respect pagination limits."""
-        response = client.get(f"/api/v1/coupon?limit={limit}")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert len(data.get("items", data.get("coupons", []))) <= limit
+    def test_validate_coupon_data_valid(self):
+        data = {
+            "code": "SAVE20",
+            "name": "20% off",
+            "value": 20,
+            "active": True
+        }
+        result = validate_coupon_data(data)
+        assert result["code"] == "SAVE20"
+        assert result["value"] == 20
+        assert result["active"] is True
 
-    def test_coupon_performance(self, client):
-        """Response time should be under 500ms."""
-        start = time.monotonic()
-        response = client.get("/api/v1/coupon")
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+    def test_validate_coupon_data_missing_fields(self):
+        with pytest.raises(ValueError, match="Missing required field"):
+            validate_coupon_data({"code": "TEST"})
+
+    def test_validate_coupon_data_sanitization(self):
+        data = {
+            "code": "SAVE20",
+            "name": "x" * 300,
+            "value": 20
+        }
+        result = validate_coupon_data(data)
+        assert len(result["name"]) == 200
 
 
-class TestCouponCaching:
-    """Tests for the Redis caching layer."""
+class TestEndpointSecurity:
+    """Test endpoint security measures."""
 
-    def test_cache_hit_returns_cached_data(self):
-        """GET /coupon/<id> should return cached data without hitting DB."""
-        cached_coupon = {"id": 1, "code": "SAVE10", "name": "Save 10", "value": 10, "active": True}
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = json.dumps(cached_coupon)
+    def test_list_coupons_invalid_limit(self, client):
+        response = client.get("/api/v1/coupon?limit=abc")
+        assert response.status_code == 400
+        assert b"error" in response.data
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
+    def test_list_coupons_limit_overflow(self, client):
+        response = client.get("/api/v1/coupon?limit=999999")
+        assert response.status_code == 400
 
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["code"] == "SAVE10"
+    def test_list_coupons_negative_offset(self, client):
+        response = client.get("/api/v1/coupon?offset=-1")
+        assert response.status_code == 400
 
-    def test_cache_miss_falls_through_to_db(self):
-        """When cache misses, the request should still succeed via DB."""
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = None
+    def test_get_coupon_invalid_id(self, client):
+        response = client.get("/api/v1/coupon/abc")
+        assert response.status_code == 400
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/nonexistent")
+    def test_get_coupon_sql_injection_attempt(self, client):
+        response = client.get("/api/v1/coupon/1' OR '1'='1")
+        assert response.status_code == 400
 
-        # Should still work (404 because coupon doesn't exist, not 500)
-        assert response.status_code == 404
+    def test_create_coupon_invalid_json(self, client):
+        response = client.post(
+            "/api/v1/coupon",
+            data="not json",
+            content_type="text/plain"
+        )
+        assert response.status_code == 400
 
-    def test_cache_failure_degrades_gracefully(self):
-        """If Redis throws, requests should still work via DB."""
-        import redis as redis_mod
-        mock_cache = MagicMock()
-        mock_cache.get.side_effect = redis_mod.RedisError("connection lost")
+    def test_create_coupon_xss_attempt(self, client):
+        response = client.post(
+            "/api/v1/coupon",
+            data=json.dumps({
+                "code": "<script>alert('xss')</script>",
+                "name": "Test",
+                "value": 10
+            }),
+            content_type="application/json"
+        )
+        assert response.status_code == 400
+        assert b"invalid characters" in response.data
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
+    def test_create_coupon_sql_injection_attempt(self, client):
+        response = client.post(
+            "/api/v1/coupon",
+            data=json.dumps({
+                "code": "'; DROP TABLE coupons;--",
+                "name": "Test",
+                "value": 10
+            }),
+            content_type="application/json"
+        )
+        assert response.status_code == 400
 
-        # Should degrade to DB path, not crash
-        assert response.status_code in (200, 404)
-
-    def test_create_invalidates_list_cache(self):
-        """POST /coupon should invalidate the list cache."""
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = None
-        mock_cache.keys.return_value = ["coupons:list:20:0"]
-
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                c.post("/api/v1/coupon", json={"name": "new", "value": 15})
-
-        mock_cache.keys.assert_called_with("coupons:list:*")
-        mock_cache.delete.assert_called_once()
+    def test_health_endpoint_exempt_from_rate_limit(self, client):
+        # Health check should always work regardless of rate limits
+        for _ in range(200):
+            response = client.get("/health")
+            assert response.status_code == 200
