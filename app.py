@@ -79,6 +79,29 @@ def get_db():
     return engine.connect()
 
 
+def validate_coupon_data(data, required_fields=None):
+    """Validate coupon request data. Returns (valid, error_message)."""
+    if required_fields is None:
+        required_fields = ["code", "name", "value"]
+    
+    if not data:
+        return False, "Request body is required"
+    
+    for field in required_fields:
+        if field not in data or data[field] is None or str(data[field]).strip() == "":
+            return False, f"Field '{field}' is required"
+    
+    if "value" in data:
+        try:
+            value = float(data["value"])
+            if value <= 0:
+                return False, "Coupon value must be greater than 0"
+        except (ValueError, TypeError):
+            return False, "Coupon value must be a valid number"
+    
+    return True, None
+
+
 @app.route("/health")
 def health():
     """Liveness probe."""
@@ -139,27 +162,99 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
-
+    """Create a new coupon."""
+    data = request.get_json()
+    
+    valid, error = validate_coupon_data(data)
+    if not valid:
+        return jsonify({"error": error}), 400
+    
+    code = data["code"].strip()
+    name = data["name"].strip()
+    value = float(data["value"])
+    active = data.get("active", True)
+    
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {"code": code, "name": name, "value": value, "active": active},
         )
-        coupon_id = result.fetchone()[0]
         conn.commit()
-
-    # Invalidate list caches so new coupon appears immediately.
+        coupon_id = result.fetchone()[0]
+    
     cache_delete("coupons:list:*")
+    
+    return jsonify({"id": coupon_id, "code": code, "name": name, "value": value, "active": active}), 201
 
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+
+@app.route("/api/v1/coupon/<coupon_id>", methods=["PUT"])
+def update_coupon(coupon_id):
+    """Update an existing coupon."""
+    data = request.get_json()
+    
+    valid, error = validate_coupon_data(data, required_fields=[])
+    if not valid:
+        return jsonify({"error": error}), 400
+    
+    if not data:
+        return jsonify({"error": "At least one field must be provided"}), 400
+    
+    update_fields = []
+    params = {"id": coupon_id}
+    
+    if "code" in data:
+        update_fields.append("code = :code")
+        params["code"] = data["code"].strip()
+    if "name" in data:
+        update_fields.append("name = :name")
+        params["name"] = data["name"].strip()
+    if "value" in data:
+        update_fields.append("value = :value")
+        params["value"] = float(data["value"])
+    if "active" in data:
+        update_fields.append("active = :active")
+        params["active"] = data["active"]
+    
+    if not update_fields:
+        return jsonify({"error": "No valid fields to update"}), 400
+    
+    with get_db() as conn:
+        result = conn.execute(
+            text(f"UPDATE coupons SET {', '.join(update_fields)} WHERE id = :id RETURNING id"),
+            params,
+        )
+        conn.commit()
+        
+        if result.rowcount == 0:
+            return jsonify({"error": "coupon not found"}), 404
+    
+    cache_delete("coupons:list:*")
+    cache_delete(f"coupons:id:{coupon_id}")
+    
+    return jsonify({"message": "coupon updated"}), 200
+
+
+@app.route("/api/v1/coupon/<coupon_id>", methods=["DELETE"])
+def delete_coupon(coupon_id):
+    """Delete a coupon."""
+    with get_db() as conn:
+        result = conn.execute(
+            text("DELETE FROM coupons WHERE id = :id"),
+            {"id": coupon_id},
+        )
+        conn.commit()
+        
+        if result.rowcount == 0:
+            return jsonify({"error": "coupon not found"}), 404
+    
+    cache_delete("coupons:list:*")
+    cache_delete(f"coupons:id:{coupon_id}")
+    
+    return jsonify({"message": "coupon deleted"}), 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=5000)
