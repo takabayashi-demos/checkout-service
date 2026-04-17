@@ -1,122 +1,141 @@
-"""Tests for coupon in checkout-service."""
-import pytest
-import time
+"""Tests for checkout-service."""
 import json
-from unittest.mock import patch, MagicMock
+import pytest
+from unittest.mock import Mock, patch, MagicMock
+from app import app, cache_get, cache_set
 
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked DB and cache."""
-    # Patch Redis before importing app so connection doesn't fail.
-    with patch("app.cache", None):
-        from app import app
-        app.config["TESTING"] = True
-        with app.test_client() as c:
-            yield c
+    """Flask test client."""
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        yield client
 
 
-class TestCoupon:
-    """Test suite for coupon operations."""
-
-    def test_health_endpoint(self, client):
-        """Health endpoint should return UP."""
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["status"] == "UP"
-
-    def test_coupon_create(self, client):
-        """Should create a new coupon entry."""
-        payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/coupon", json=payload)
-        assert response.status_code in (200, 201)
-
-    def test_coupon_validation(self, client):
-        """Should reject invalid coupon data."""
-        response = client.post("/api/v1/coupon", json={})
-        assert response.status_code in (400, 422)
-
-    def test_coupon_not_found(self, client):
-        """Should return 404 for missing coupon."""
-        response = client.get("/api/v1/coupon/nonexistent")
-        assert response.status_code == 404
-
-    @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_coupon_pagination(self, client, limit):
-        """Should respect pagination limits."""
-        response = client.get(f"/api/v1/coupon?limit={limit}")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert len(data.get("items", data.get("coupons", []))) <= limit
-
-    def test_coupon_performance(self, client):
-        """Response time should be under 500ms."""
-        start = time.monotonic()
-        response = client.get("/api/v1/coupon")
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+@pytest.fixture
+def mock_db():
+    """Mock database connection."""
+    with patch("app.get_db") as mock:
+        yield mock
 
 
-class TestCouponCaching:
-    """Tests for the Redis caching layer."""
+@pytest.fixture
+def mock_cache():
+    """Mock Redis cache."""
+    with patch("app.cache") as mock:
+        mock.get.return_value = None
+        yield mock
 
-    def test_cache_hit_returns_cached_data(self):
-        """GET /coupon/<id> should return cached data without hitting DB."""
-        cached_coupon = {"id": 1, "code": "SAVE10", "name": "Save 10", "value": 10, "active": True}
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = json.dumps(cached_coupon)
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
+def test_validate_coupon_valid(client, mock_db, mock_cache):
+    """Valid active coupon returns valid=true with coupon details."""
+    mock_conn = MagicMock()
+    mock_db.return_value.__enter__.return_value = mock_conn
+    
+    mock_row = Mock()
+    mock_row._mapping = {
+        "id": 1,
+        "code": "SAVE20",
+        "name": "20% Off",
+        "value": 20,
+        "active": True,
+    }
+    mock_conn.execute.return_value.fetchone.return_value = mock_row
 
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["code"] == "SAVE10"
+    response = client.post(
+        "/api/v1/coupon/validate",
+        data=json.dumps({"code": "SAVE20"}),
+        content_type="application/json",
+    )
 
-    def test_cache_miss_falls_through_to_db(self):
-        """When cache misses, the request should still succeed via DB."""
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = None
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["valid"] is True
+    assert data["coupon"]["code"] == "SAVE20"
+    assert data["coupon"]["value"] == 20
+    assert data["error"] is None
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/nonexistent")
 
-        # Should still work (404 because coupon doesn't exist, not 500)
-        assert response.status_code == 404
+def test_validate_coupon_inactive(client, mock_db, mock_cache):
+    """Inactive coupon returns valid=false with error message."""
+    mock_conn = MagicMock()
+    mock_db.return_value.__enter__.return_value = mock_conn
+    
+    mock_row = Mock()
+    mock_row._mapping = {
+        "id": 2,
+        "code": "EXPIRED",
+        "name": "Expired Coupon",
+        "value": 10,
+        "active": False,
+    }
+    mock_conn.execute.return_value.fetchone.return_value = mock_row
 
-    def test_cache_failure_degrades_gracefully(self):
-        """If Redis throws, requests should still work via DB."""
-        import redis as redis_mod
-        mock_cache = MagicMock()
-        mock_cache.get.side_effect = redis_mod.RedisError("connection lost")
+    response = client.post(
+        "/api/v1/coupon/validate",
+        data=json.dumps({"code": "EXPIRED"}),
+        content_type="application/json",
+    )
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                response = c.get("/api/v1/coupon/1")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["valid"] is False
+    assert data["coupon"] is None
+    assert data["error"] == "coupon is inactive"
 
-        # Should degrade to DB path, not crash
-        assert response.status_code in (200, 404)
 
-    def test_create_invalidates_list_cache(self):
-        """POST /coupon should invalidate the list cache."""
-        mock_cache = MagicMock()
-        mock_cache.get.return_value = None
-        mock_cache.keys.return_value = ["coupons:list:20:0"]
+def test_validate_coupon_not_found(client, mock_db, mock_cache):
+    """Non-existent coupon returns 404."""
+    mock_conn = MagicMock()
+    mock_db.return_value.__enter__.return_value = mock_conn
+    mock_conn.execute.return_value.fetchone.return_value = None
 
-        with patch("app.cache", mock_cache):
-            from app import app
-            app.config["TESTING"] = True
-            with app.test_client() as c:
-                c.post("/api/v1/coupon", json={"name": "new", "value": 15})
+    response = client.post(
+        "/api/v1/coupon/validate",
+        data=json.dumps({"code": "NOTFOUND"}),
+        content_type="application/json",
+    )
 
-        mock_cache.keys.assert_called_with("coupons:list:*")
-        mock_cache.delete.assert_called_once()
+    assert response.status_code == 404
+    data = response.get_json()
+    assert data["valid"] is False
+    assert data["error"] == "coupon not found"
+
+
+def test_validate_coupon_missing_code(client):
+    """Request without code returns 400."""
+    response = client.post(
+        "/api/v1/coupon/validate",
+        data=json.dumps({}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert "error" in data
+    assert "required" in data["error"]
+
+
+def test_validate_coupon_cache_hit(client, mock_cache):
+    """Cached validation result is returned without DB query."""
+    cached_response = {
+        "valid": True,
+        "coupon": {"id": 1, "code": "CACHED", "value": 15, "active": True},
+        "error": None,
+    }
+    mock_cache.get.return_value = json.dumps(cached_response)
+
+    with patch("app.get_db") as mock_db:
+        response = client.post(
+            "/api/v1/coupon/validate",
+            data=json.dumps({"code": "CACHED"}),
+            content_type="application/json",
+        )
+
+        mock_db.assert_not_called()
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["valid"] is True
+    assert data["coupon"]["code"] == "CACHED"

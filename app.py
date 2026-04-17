@@ -18,8 +18,6 @@ DATABASE_URL = os.environ.get(
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CACHE_TTL = int(os.environ.get("COUPON_CACHE_TTL", 60))
 
-# Connection pooling — reuse connections across requests instead of
-# opening a new connection per request (was the main latency source).
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
@@ -29,9 +27,6 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
-# Redis cache — coupon reads are extremely hot during checkout surges.
-# A 60s TTL is safe because coupons change infrequently and we
-# invalidate on write.
 try:
     cache = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=0.5)
     cache.ping()
@@ -139,27 +134,72 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    required = ["code", "name", "value"]
+    if not data or not all(k in data for k in required):
+        return jsonify({"error": "code, name, and value are required"}), 400
+
+    active = data.get("active", True)
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) "
+                "RETURNING id, code, name, value, active"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": active,
+            },
         )
-        coupon_id = result.fetchone()[0]
+        row = result.fetchone()
         conn.commit()
 
-    # Invalidate list caches so new coupon appears immediately.
     cache_delete("coupons:list:*")
 
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+    coupon_data = dict(row._mapping)
+    return jsonify(coupon_data), 201
+
+
+@app.route("/api/v1/coupon/validate", methods=["POST"])
+def validate_coupon():
+    """Validate a coupon code. Returns validation status and coupon details if valid."""
+    data = request.get_json()
+    if not data or "code" not in data:
+        return jsonify({"error": "coupon code required"}), 400
+
+    code = data["code"]
+    cache_key = f"coupons:code:{code}"
+    cached = cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    with get_db() as conn:
+        result = conn.execute(
+            text("SELECT id, code, name, value, active FROM coupons WHERE code = :code"),
+            {"code": code},
+        )
+        row = result.fetchone()
+
+    if row is None:
+        response_data = {"valid": False, "error": "coupon not found"}
+        return jsonify(response_data), 404
+
+    coupon = dict(row._mapping)
+    valid = coupon["active"]
+    response_data = {
+        "valid": valid,
+        "coupon": coupon if valid else None,
+        "error": None if valid else "coupon is inactive",
+    }
+
+    cache_set(cache_key, response_data)
+    return jsonify(response_data)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080, debug=os.environ.get("FLASK_DEBUG", False))
