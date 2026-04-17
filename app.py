@@ -63,13 +63,12 @@ def cache_set(key, value, ttl=CACHE_TTL):
 
 
 def cache_delete(pattern):
-    """Invalidate cache entries matching a prefix."""
+    """Invalidate cache entries matching a prefix using non-blocking SCAN."""
     if cache is None:
         return
     try:
-        keys = cache.keys(pattern)
-        if keys:
-            cache.delete(*keys)
+        for key in cache.scan_iter(match=pattern, count=100):
+            cache.delete(key)
     except redis.RedisError:
         pass
 
@@ -139,27 +138,58 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon."""
+    data = request.get_json()
+    required = ["code", "name", "value"]
+    if not all(field in data for field in required):
+        return jsonify({"error": "missing required fields"}), 400
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": data.get("active", True),
+            },
         )
         coupon_id = result.fetchone()[0]
         conn.commit()
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
+    cache_delete("coupons:*")
+    return jsonify({"id": coupon_id}), 201
 
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+
+@app.route("/api/v1/coupon/<coupon_id>", methods=["PUT"])
+def update_coupon(coupon_id):
+    """Update an existing coupon."""
+    data = request.get_json()
+    
+    with get_db() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE coupons SET code = :code, name = :name, "
+                "value = :value, active = :active WHERE id = :id"
+            ),
+            {
+                "id": coupon_id,
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": data.get("active", True),
+            },
+        )
+        conn.commit()
+        if result.rowcount == 0:
+            return jsonify({"error": "coupon not found"}), 404
+
+    cache_delete("coupons:*")
+    return jsonify({"status": "updated"})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=5000)
