@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import re
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
@@ -79,6 +80,40 @@ def get_db():
     return engine.connect()
 
 
+def validate_coupon_code(code):
+    """Validate coupon code format: alphanumeric, dashes, underscores only."""
+    if not code or not isinstance(code, str):
+        return False
+    if len(code) > 50:
+        return False
+    return bool(re.match(r'^[A-Za-z0-9_-]+$', code))
+
+
+def validate_coupon_input(data):
+    """Validate coupon creation/update input."""
+    errors = []
+    
+    if 'code' not in data:
+        errors.append("code is required")
+    elif not validate_coupon_code(data['code']):
+        errors.append("code must be alphanumeric with dashes/underscores, max 50 chars")
+    
+    if 'name' not in data:
+        errors.append("name is required")
+    elif not isinstance(data['name'], str) or len(data['name']) > 200:
+        errors.append("name must be a string, max 200 chars")
+    
+    if 'value' not in data:
+        errors.append("value is required")
+    elif not isinstance(data['value'], (int, float)) or data['value'] < 0:
+        errors.append("value must be a non-negative number")
+    
+    if 'active' in data and not isinstance(data['active'], bool):
+        errors.append("active must be a boolean")
+    
+    return errors
+
+
 @app.route("/health")
 def health():
     """Liveness probe."""
@@ -139,26 +174,81 @@ def get_coupon(coupon_id):
 
 @app.route("/api/v1/coupon", methods=["POST"])
 def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+    """Create a new coupon with validation."""
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+    
+    data = request.get_json()
+    
+    validation_errors = validate_coupon_input(data)
+    if validation_errors:
+        return jsonify({"error": "validation failed", "details": validation_errors}), 400
+    
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text(
+                    "INSERT INTO coupons (code, name, value, active) "
+                    "VALUES (:code, :name, :value, :active) RETURNING id"
+                ),
+                {
+                    "code": data["code"],
+                    "name": data["name"],
+                    "value": data["value"],
+                    "active": data.get("active", True),
+                },
+            )
+            conn.commit()
+            coupon_id = result.fetchone()[0]
+        
+        cache_delete("coupons:list:*")
+        
+        return jsonify({"id": coupon_id, "message": "coupon created"}), 201
+    
+    except Exception as e:
+        logger.error(f"Failed to create coupon: {e}")
+        return jsonify({"error": "failed to create coupon"}), 500
 
-    with get_db() as conn:
-        result = conn.execute(
-            text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
-            ),
-            {"name": data["name"], "value": data["value"]},
-        )
-        coupon_id = result.fetchone()[0]
-        conn.commit()
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
-
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+@app.route("/api/v1/coupon/<int:coupon_id>", methods=["PUT"])
+def update_coupon(coupon_id):
+    """Update an existing coupon with validation."""
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+    
+    data = request.get_json()
+    
+    validation_errors = validate_coupon_input(data)
+    if validation_errors:
+        return jsonify({"error": "validation failed", "details": validation_errors}), 400
+    
+    try:
+        with get_db() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE coupons SET code = :code, name = :name, "
+                    "value = :value, active = :active WHERE id = :id"
+                ),
+                {
+                    "id": coupon_id,
+                    "code": data["code"],
+                    "name": data["name"],
+                    "value": data["value"],
+                    "active": data.get("active", True),
+                },
+            )
+            conn.commit()
+            
+            if result.rowcount == 0:
+                return jsonify({"error": "coupon not found"}), 404
+        
+        cache_delete("coupons:*")
+        
+        return jsonify({"message": "coupon updated"}), 200
+    
+    except Exception as e:
+        logger.error(f"Failed to update coupon: {e}")
+        return jsonify({"error": "failed to update coupon"}), 500
 
 
 if __name__ == "__main__":
