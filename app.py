@@ -137,28 +137,64 @@ def get_coupon(coupon_id):
     return jsonify(coupon_data)
 
 
-@app.route("/api/v1/coupon", methods=["POST"])
-def create_coupon():
-    """Create a new coupon. Invalidates list cache."""
-    data = request.get_json(silent=True) or {}
-    if not data.get("name") or "value" not in data:
-        return jsonify({"error": "name and value are required"}), 400
+@app.route("/api/v1/coupon/validate", methods=["GET"])
+def validate_coupon():
+    """Validate a coupon code. Returns coupon if valid and active."""
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "code parameter required"}), 400
+
+    cache_key = f"coupons:code:{code}"
+    cached = cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
 
     with get_db() as conn:
         result = conn.execute(
             text(
-                "INSERT INTO coupons (name, value, active) "
-                "VALUES (:name, :value, true) RETURNING id"
+                "SELECT id, code, name, value, active FROM coupons "
+                "WHERE code = :code AND active = true"
             ),
-            {"name": data["name"], "value": data["value"]},
+            {"code": code},
         )
-        coupon_id = result.fetchone()[0]
+        row = result.fetchone()
+
+    if row is None:
+        return jsonify({"error": "invalid or inactive coupon code"}), 404
+
+    coupon_data = dict(row._mapping)
+    cache_set(cache_key, coupon_data)
+    return jsonify(coupon_data)
+
+
+@app.route("/api/v1/coupon", methods=["POST"])
+def create_coupon():
+    """Create a new coupon."""
+    data = request.get_json()
+    required = ["code", "name", "value"]
+    if not all(field in data for field in required):
+        return jsonify({"error": "missing required fields"}), 400
+
+    active = data.get("active", True)
+
+    with get_db() as conn:
+        result = conn.execute(
+            text(
+                "INSERT INTO coupons (code, name, value, active) "
+                "VALUES (:code, :name, :value, :active) RETURNING id"
+            ),
+            {
+                "code": data["code"],
+                "name": data["name"],
+                "value": data["value"],
+                "active": active,
+            },
+        )
         conn.commit()
+        coupon_id = result.fetchone()[0]
 
-    # Invalidate list caches so new coupon appears immediately.
-    cache_delete("coupons:list:*")
-
-    return jsonify({"id": coupon_id, "name": data["name"], "value": data["value"]}), 201
+    cache_delete("coupons:*")
+    return jsonify({"id": coupon_id}), 201
 
 
 if __name__ == "__main__":
